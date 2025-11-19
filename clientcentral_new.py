@@ -145,7 +145,7 @@ def generate_pdf_with_border_footer(tickets_by_status, output_file="Ticket_Repor
 
 # ----------------- Main Execution -----------------
 if __name__ == "__main__":
-    cc_token = "28585-S38M3yB-PqF5cE5bqIrlKU0UtCpMxjD3lyZ026avZM5Scs9qSzHF_HvvnR"  # Add your token here
+    cc_token = ""  # Add your token here
     cc_account_id = 6166
 
     tickets = fetch_previous_month_tickets(cc_token, cc_account_id)
