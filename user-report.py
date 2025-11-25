@@ -6,14 +6,64 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 
-# ========== CONFIGURATION ==========
+# ==========================================
+# CONFIGURATION
+# ==========================================
+AWS_REGION = "us-east-1"
+
+ROLE_ARN = "arn:aws:iam::711387139366:role/audit-automation-role"   # <<< UPDATE THIS
+SESSION_NAME = "sso-user-list-session"
+EXTERNAL_ID = None   # Only if required
+
 EXCLUDE_DOMAINS = ["epiuse.com", "afonza.com"]
 REPORT_FILE = "SSO_User_List_Evosus.pdf"
-# ==================================
+# ==========================================
 
 
+# ==========================================
+# STS Assume Role
+# ==========================================
+def assume_role(role_arn, session_name, external_id=None):
+    sts_client = boto3.client("sts", region_name=AWS_REGION)
+
+    if external_id:
+        resp = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=session_name,
+            ExternalId=external_id
+        )
+    else:
+        resp = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName=session_name
+        )
+
+    creds = resp["Credentials"]
+    return {
+        "aws_access_key_id": creds["AccessKeyId"],
+        "aws_secret_access_key": creds["SecretAccessKey"],
+        "aws_session_token": creds["SessionToken"]
+    }
+
+
+# ==========================================
+# Client helper using assumed role
+# ==========================================
+def aws_client(service, session):
+    return boto3.client(
+        service,
+        region_name=AWS_REGION,
+        aws_access_key_id=session["aws_access_key_id"],
+        aws_secret_access_key=session["aws_secret_access_key"],
+        aws_session_token=session["aws_session_token"],
+    )
+
+
+# ==========================================
+# PDF Class
+# ==========================================
 class BorderPDF(SimpleDocTemplate):
-    """Custom PDF class with consistent border and footer."""
+    """Custom PDF class with border and footer."""
     def __init__(self, filename, **kwargs):
         super().__init__(filename, **kwargs)
 
@@ -21,21 +71,22 @@ class BorderPDF(SimpleDocTemplate):
         c: canvas.Canvas = self.canv
         width, height = landscape(A4)
 
-        # Outer border
         margin = 25
         c.setLineWidth(1)
         c.rect(margin, margin, width - 2 * margin, height - 2 * margin)
 
-        # Footer (no CloudOps or user count)
         footer_text = f"Evosus | SSO User List | Page {self.page}"
         c.setFont("Helvetica", 9)
         c.setFillColor(colors.grey)
         c.drawCentredString(width / 2, 18, footer_text)
 
 
-def get_identity_store_id():
+# ==========================================
+# AWS Logic (now using STS session)
+# ==========================================
+def get_identity_store_id(session):
     """Fetch the AWS IAM Identity Store ID dynamically."""
-    sso_admin = boto3.client("sso-admin")
+    sso_admin = aws_client("sso-admin", session)
     instances = sso_admin.list_instances()
 
     if not instances["Instances"]:
@@ -44,11 +95,11 @@ def get_identity_store_id():
     return instances["Instances"][0]["IdentityStoreId"]
 
 
-def list_all_users(identity_store_id, exclude_domains=None):
-    """List all users and exclude those with specific email domains."""
-    client = boto3.client("identitystore")
-    paginator = client.get_paginator("list_users")
+def list_all_users(session, identity_store_id, exclude_domains=None):
+    """List all users and exclude emails from unwanted domains."""
+    identity = aws_client("identitystore", session)
 
+    paginator = identity.get_paginator("list_users")
     page_iterator = paginator.paginate(
         IdentityStoreId=identity_store_id,
         PaginationConfig={"PageSize": 50}
@@ -71,17 +122,20 @@ def list_all_users(identity_store_id, exclude_domains=None):
     return users
 
 
+# ==========================================
+# PDF Generation
+# ==========================================
 def generate_pdf_report(users, file_name):
-    """Generate a polished PDF report with border, footer, and styled table."""
+    """Generate PDF report."""
     doc = BorderPDF(file_name, pagesize=landscape(A4))
     styles = getSampleStyleSheet()
     elements = []
 
-    # ===== Header =====
+    # Header
     title = Paragraph("<b>SSO User List - Evosus</b>", styles["Title"])
     elements += [title, Spacer(1, 20)]
 
-    # ===== Table =====
+    # Table
     data = [["Username", "Display Name", "Email"]] + users
     table = Table(data, repeatRows=1, colWidths=[2.5 * inch, 3 * inch, 3 * inch])
 
@@ -99,15 +153,20 @@ def generate_pdf_report(users, file_name):
 
     elements.append(table)
 
-    # ===== Build PDF =====
     doc.build(elements)
     print(f"📄 PDF generated: {file_name}")
 
 
+# ==========================================
+# Main Entry
+# ==========================================
 def main():
     try:
-        identity_store_id = get_identity_store_id()
-        users = list_all_users(identity_store_id, exclude_domains=EXCLUDE_DOMAINS)
+        print("🔄 Assuming IAM Role for Identity Center User List...")
+        session = assume_role(ROLE_ARN, SESSION_NAME, EXTERNAL_ID)
+
+        identity_store_id = get_identity_store_id(session)
+        users = list_all_users(session, identity_store_id, exclude_domains=EXCLUDE_DOMAINS)
 
         if not users:
             print("⚠️ No users found after filtering excluded domains.")
