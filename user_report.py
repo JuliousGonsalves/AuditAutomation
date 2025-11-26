@@ -1,7 +1,8 @@
 import boto3
+from datetime import date
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
@@ -17,6 +18,13 @@ EXTERNAL_ID = None   # Only if required
 
 EXCLUDE_DOMAINS = ["epiuse.com", "afonza.com"]
 REPORT_FILE = "SSO_User_List_Evosus.pdf"
+CLIENT_NAME = "Evosus"
+
+# Previous month (same logic as other reports)
+_today = date.today()
+_prev_month = _today.month - 1 or 12
+_prev_year = _today.year if _today.month != 1 else _today.year - 1
+REPORT_MONTH_STR = date(_prev_year, _prev_month, 1).strftime("%B %Y")
 # ==========================================
 
 
@@ -60,10 +68,10 @@ def aws_client(service, session):
 
 
 # ==========================================
-# PDF Class
+# PDF Class (border + blue header + footer inside border)
 # ==========================================
 class BorderPDF(SimpleDocTemplate):
-    """Custom PDF class with border and footer."""
+    """Custom PDF class with border, header bar, and footer."""
     def __init__(self, filename, **kwargs):
         super().__init__(filename, **kwargs)
 
@@ -73,12 +81,28 @@ class BorderPDF(SimpleDocTemplate):
 
         margin = 25
         c.setLineWidth(1)
+
+        # Outer border
         c.rect(margin, margin, width - 2 * margin, height - 2 * margin)
 
-        footer_text = f"Evosus | SSO User List | Page {self.page}"
-        c.setFont("Helvetica", 9)
+        # Dark blue header bar
+        c.setFillColor("#003366")
+        c.rect(margin, height - margin - 35, width - 2 * margin, 35, fill=1)
+
+        # Header text (white, centered)
+        header_text = f"SSO User List - {CLIENT_NAME} - {REPORT_MONTH_STR}"
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillColor(colors.white)
+        c.drawCentredString(width / 2, height - margin - 15, header_text)
+
+        # Footer inside border
+        c.setFont("Helvetica-Oblique", 9)
         c.setFillColor(colors.grey)
-        c.drawCentredString(width / 2, 18, footer_text)
+        c.drawCentredString(
+            width / 2,
+            margin + 8,  # inside border, similar to other reports
+            f"Monthly Audit Report - {REPORT_MONTH_STR}",
+        )
 
 
 # ==========================================
@@ -131,9 +155,8 @@ def generate_pdf_report(users, file_name):
     styles = getSampleStyleSheet()
     elements = []
 
-    # Header
-    title = Paragraph("<b>SSO User List - Evosus</b>", styles["Title"])
-    elements += [title, Spacer(1, 20)]
+    # Spacer to account for header bar area
+    elements.append(Spacer(1, 50))
 
     # Table
     data = [["Username", "Display Name", "Email"]] + users

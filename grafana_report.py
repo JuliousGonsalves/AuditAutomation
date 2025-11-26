@@ -14,9 +14,9 @@ import json
 # ===========================
 ROLE_ARN = "arn:aws:iam::445567102114:role/automation-from-prod"  # <<< UPDATE THIS
 SESSION_NAME = "grafana-report-session"
-EXTERNAL_ID = None   # Only if your role requires an external ID
+EXTERNAL_ID = None
 
-AWS_REGION = "us-east-1"  # <<< DEFAULT REGION ADDED
+AWS_REGION = "us-east-1"
 
 
 def assume_role(role_arn, session_name, external_id=None):
@@ -114,15 +114,33 @@ BANNER_SELECTORS = [
 # ========================
 class BorderPDF(FPDF):
     def header(self):
+        # Outer border
         self.set_draw_color(0, 0, 0)
-        self.set_line_width(0.5)
+        self.set_line_width(0.6)
         self.rect(5, 5, 200, 287)
+
+        # Dark blue header bar
+        self.set_fill_color(0, 51, 102)
+        self.rect(5, 5, 200, 15, style="F")
+
+        # Header title (ASCII only)
+        self.set_xy(5, 5)
+        self.set_text_color(255, 255, 255)
+        self.set_font("Arial", "B", 11)
+        self.cell(
+            200,
+            15,
+            f"Monitoring Report - Evosus - {self.report_month}",
+            border=0,
+            ln=1,
+            align="C"
+        )
 
     def footer(self):
         self.set_y(-15)
-        self.set_font("Arial", "I", 8)
         self.set_text_color(100, 100, 100)
-        self.cell(0, 10, f"{CLIENT_CONFIG['client_name']} | CloudOps Monitoring Report | Page {self.page_no()}", align="C")
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Monthly Audit Report - {self.report_month}", align="C")
 
 
 # ========================
@@ -136,7 +154,7 @@ def get_previous_month_range():
 
     from_epoch = int(datetime.datetime.combine(first_day_prev_month, datetime.time.min).timestamp() * 1000)
     to_epoch = int(datetime.datetime.combine(last_day_prev_month, datetime.time.max).timestamp() * 1000)
-    month_name = first_day_prev_month.strftime("%B %Y")
+    month_name = first_day_prev_month.strftime("%B %Y")  # ASCII only
 
     return from_epoch, to_epoch, month_name
 
@@ -146,15 +164,11 @@ def get_previous_month_range():
 # ========================
 def main():
 
-    # ==========================================================
-    # Assume Role and Load Token
-    # ==========================================================
     print("🔄 Assuming IAM role…")
     session = assume_role(ROLE_ARN, SESSION_NAME, EXTERNAL_ID)
 
     CLIENT_CONFIG["service_token"] = fetch_grafana_token("grafana/service-account-token", session)
     print("🔐 Loaded Grafana API token using assumed role.")
-    # ==========================================================
 
     os.makedirs(CLIENT_CONFIG["output_dir"], exist_ok=True)
     from_epoch, to_epoch, month_name = get_previous_month_range()
@@ -164,12 +178,10 @@ def main():
     ]
 
     pdf = BorderPDF(unit="mm", format="A4")
+    pdf.report_month = month_name
     pdf.set_auto_page_break(auto=True, margin=15)
 
     with sync_playwright() as p:
-        # ======================================================
-        # FIREFOX (minimal change)
-        # ======================================================
         browser = p.firefox.launch(headless=True)
 
         context = browser.new_context(
@@ -181,16 +193,7 @@ def main():
 
         # ===== TITLE PAGE =====
         pdf.add_page()
-        pdf.set_font("Arial", "B", 18)
-        pdf.cell(0, 15, f"Monitoring Report - {month_name}", align="C", ln=True)
-        pdf.set_font("Arial", "", 13)
-        pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%B %d, %Y')}", align="C", ln=True)
-        pdf.ln(25)
-
-        pdf.set_draw_color(180, 180, 180)
-        pdf.set_line_width(0.3)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(15)
+        pdf.ln(20)
 
         # ===== LOOP ENVIRONMENTS =====
         for ns in CLIENT_CONFIG["namespaces"]:
@@ -202,15 +205,13 @@ def main():
                 )
 
                 print(f"🚀 Processing {ns}.{env} for {month_name}")
-                page.goto(url, wait_until="networkidle", timeout=120_000)
+                page.goto(url, wait_until="networkidle", timeout=120000)
 
-                # COOKIE POPUPS
                 accepted = False
                 for sel in ACCEPT_BUTTON_SELECTORS:
                     try:
                         page.wait_for_selector(sel, timeout=5000)
                         page.click(sel)
-                        page.wait_for_timeout(1000)
                         accepted = True
                         break
                     except:
@@ -220,11 +221,12 @@ def main():
                     hide_css = "\n".join([f"{s} {{ display:none !important; }}" for s in BANNER_SELECTORS])
                     page.add_style_tag(content=hide_css)
 
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(2500)
 
                 # PANEL DETECTION
                 panel_selectors = [".panel-container", ".react-grid-item", "[data-panelid]", ".grafana-panel"]
                 all_panels = []
+
                 for selector in panel_selectors:
                     panels = page.query_selector_all(selector)
                     if panels:
@@ -235,23 +237,24 @@ def main():
                     potential_panels = page.query_selector_all("div[class*='panel']")
                     all_panels = [p for p in potential_panels if p.bounding_box()]
 
-                # SCREENSHOT LOOP
+                # SCREENSHOTS
                 for i, panel in enumerate(all_panels):
                     try:
                         panel.scroll_into_view_if_needed()
-                        page.wait_for_timeout(1000)
+                        page.wait_for_timeout(800)
 
                         box = panel.bounding_box()
                         if not box:
                             continue
 
                         heading = PREDEFINED_HEADINGS[i] if i < len(PREDEFINED_HEADINGS) else f"Panel_{i+1}"
-                        sanitized_title = re.sub(r"[^a-zA-Z0-9_-]+", "_", heading)
-                        img_path = f"{CLIENT_CONFIG['output_dir']}/{CLIENT_CONFIG['client_name']}_{month_name}_{sanitized_title}.png"
+                        sanitized = re.sub(r"[^a-zA-Z0-9_-]+", "_", heading)
+                        img_path = f"{CLIENT_CONFIG['output_dir']}/{CLIENT_CONFIG['client_name']}_{month_name}_{sanitized}.png"
 
                         panel.screenshot(path=img_path)
                         print(f"✅ Saved: {img_path}")
 
+                        # IMAGE SIZING
                         image = Image.open(img_path)
                         width, height = image.size
 
@@ -265,6 +268,7 @@ def main():
                         if pdf.get_y() + height_mm + 40 > 280:
                             pdf.add_page()
 
+                        # Heading
                         pdf.set_font("Arial", "B", 13)
                         pdf.multi_cell(0, 10, heading, align="C")
                         pdf.ln(5)
@@ -273,22 +277,20 @@ def main():
                         y_start = pdf.get_y()
                         pdf.image(img_path, x=x_offset, y=y_start, w=width_mm, h=height_mm)
 
-                        pdf.set_y(y_start + height_mm + 8)
-                        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-                        pdf.ln(10)
+                        pdf.set_y(y_start + height_mm + 10)
 
                     except Exception as e:
-                        print(f"❌ Failed screenshot for panel {i+1}: {e}")
+                        print(f"❌ Error screenshot panel {i+1}: {e}")
 
         browser.close()
 
-        pdf_output_path = os.path.join(
+        pdf_out = os.path.join(
             CLIENT_CONFIG["output_dir"],
-            f"{CLIENT_CONFIG['client_name']}_Monitoring_Report_{month_name.replace(' ', '_')}.pdf"
+            f"Monitoring_Report.pdf"
         )
 
-        pdf.output(pdf_output_path)
-        print(f"✅ Monitoring report created: {pdf_output_path}")
+        pdf.output(pdf_out)
+        print(f"✅ Monitoring report created: {pdf_out}")
 
 
 if __name__ == "__main__":
